@@ -1,0 +1,6 @@
+flask
+pymodbus
+pandas
+paramiko
+schedule
+pika

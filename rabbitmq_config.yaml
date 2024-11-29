@@ -1,0 +1,5 @@
+rabbitmq:
+  host: "localhost"          # RabbitMQ sunucu adresi
+  port: 5672                 # RabbitMQ portu
+  queue_name: "my_queue"   # RabbitMQ kuyruk adı
+  durable: true              # Kuyruk kalıcı mı olsun
