@@ -62,13 +62,16 @@ def process_data_from_json(config):
     register_configs = config['register_configs']
     intervals = config['intervals']
 
+    # İlk başta tüm register isimlerini içerecek fieldnames listesi oluşturuluyor
     fieldnames = ['Date', 'Slave_ID', 'Brand']
     all_fieldnames = set()
 
+    # Tüm register isimlerini ekliyoruz
     for brand, brand_config in register_configs.items():
         for reg in brand_config['registers']:
             all_fieldnames.add(reg['name'])
 
+    # Fieldnames'e tüm register isimlerini ekliyoruz
     fieldnames += list(all_fieldnames)
     output_dir = 'output'
     if not os.path.exists(output_dir):
@@ -91,7 +94,10 @@ def process_data_from_json(config):
         while running:
             current_time = time.time()
 
-            # Her markanın okuma süresi kadar bekleyip verileri alıyoruz
+            # Bağlantı hatası durumu
+            connection_failed = {slave_id: False for slave_id in slave_brand_map}
+
+            # Her bir slave için verileri okuma işlemi
             for brand, brand_config in register_configs.items():
                 slave_id = brand_config['slaveId']
                 read_interval = brand_config['read_interval']  # Brand'a özel okuma süresi
@@ -103,22 +109,23 @@ def process_data_from_json(config):
 
                 client = client_map[slave_id]
 
-                # Modbus verisini okuma işlemi
-                if client.connect():
-                    # Her slave için okuma zamanını kontrol ediyoruz
-                    if current_time - last_read_times[brand] >= read_interval:
-                        print(f"Reading data from Slave ID {slave_id} ({brand})")
+                try:
+                    # Modbus verisini okuma işlemi
+                    if client.connect():
+                        # Her slave için okuma zamanını kontrol ediyoruz
+                        if current_time - last_read_times[brand] >= read_interval:
+                            print(f"Reading data from Slave ID {slave_id} ({brand})")
 
-                        data_row = {
-                            'Date': datetime.now().strftime('%d%m%y%H%M%S'),
-                            'Slave_ID': slave_id,
-                            'Brand': brand
-                        }
+                            # Slave ve Brand'e özel veri satırı oluştur
+                            row = {
+                                'Date': datetime.now().strftime('%d%m%y%H%M%S'),
+                                'Slave_ID': slave_id,
+                                'Brand': brand
+                            }
 
-                        for reg in registers_config:
-                            try:
+                            # Modbus register'larını oku
+                            for reg in registers_config:
                                 registers = client.read_registers(reg['address'], reg['count'])
-
                                 if registers is None:
                                     formatted_value = "NULL"
                                 else:
@@ -138,20 +145,35 @@ def process_data_from_json(config):
                                     else:
                                         formatted_value = str(value)
 
-                                data_row[reg['name']] = formatted_value
+                                row[reg['name']] = formatted_value
 
-                            except Exception as e:
-                                print(f"Error with register {reg['name']}: {e}")
-                                data_row[reg['name']] = "ERROR"
-
-                        data_rows.append(data_row)
-                        last_read_times[brand] = current_time  # Son okuma zamanını güncelle
+                            data_rows.append(row)  # Bu satırı verilerimize ekle
+                            last_read_times[brand] = current_time  # Son okuma zamanını güncelle
+                        else:
+                            # Okuma için belirlenen aralık gelmediyse bekle
+                            continue
                     else:
-                        # Okuma için belirlenen aralık gelmediyse bekle
-                        continue
+                        # Bağlantı sağlanamazsa "NULL" yazılması için işaretle
+                        connection_failed[slave_id] = True
 
-                else:
-                    print(f"Connection failed for Slave ID {slave_id} ({brand})")
+                except Exception as e:
+                    print(f"Error with register {reg['name']}: {e}")
+                    connection_failed[slave_id] = True
+
+            # Eğer bağlantı hatası varsa, yalnızca bağlantı kopan slave'lerin verilerini NULL ile yazacağız
+            for brand, brand_config in register_configs.items():
+                slave_id = brand_config['slaveId']
+                if connection_failed[slave_id]:
+                    # Bağlantı hatası durumunda "NULL" yaz
+                    row = {
+                        'Date': datetime.now().strftime('%d%m%y%H%M%S'),
+                        'Slave_ID': slave_id,
+                        'Brand': brand
+                    }
+                    for reg in brand_config['registers']:
+                        row[reg['name']] = "NULL"
+
+                    data_rows.append(row)
 
             # CSV'yi belirli bir aralıkla yazma
             if current_time - last_csv_write_time >= intervals['csv_write_interval']:
@@ -164,6 +186,14 @@ def process_data_from_json(config):
                     with open(csv_file, mode='w', newline='', encoding='utf-8-sig') as file:
                         writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=';', quoting=csv.QUOTE_MINIMAL)
                         writer.writeheader()
+
+                        # Her satırda eksik register'lar varsa NULL ile doldur
+                        for row in data_rows:
+                            # Eksik register'lar için "NULL" yazalım
+                            for field in fieldnames:
+                                if field not in row:
+                                    row[field] = "NULL"
+
                         writer.writerows(data_rows)
 
                     print(f"CSV dosyası {csv_filename} yazıldı.")
@@ -183,6 +213,11 @@ def process_data_from_json(config):
         print("Process interrupted.")
     except Exception as e:
         print(f"Error: {e}")
+
+
+
+
+
 
 
 # RabbitMQ'ya veri gönderme fonksiyonu

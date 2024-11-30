@@ -100,61 +100,84 @@ def process_data_from_json(config):
 
                 # Bağlantıyı sadece bir kez yapıyoruz, her markada farklı bağlantı oluşturuluyor
                 if slave_id not in client_map:
-                    client_map[slave_id] = ModbusClient(modbus_config['host'], modbus_config['port'], slave_id)
+                    client_map[slave_id] = ModbusClient(modbus_config['host'], modbus_config['port'], slave_id, timeout=10.0)
 
                 client = client_map[slave_id]
 
                 # Modbus verisini okuma işlemi
-                if client.connect():
-                    # Her slave için okuma zamanını kontrol ediyoruz
-                    if current_time - last_read_times[brand] >= read_interval:
-                        print(f"Reading data from Slave ID {slave_id} ({brand})")
+                try:
+                    if client.connect():
+                        # Her slave için okuma zamanını kontrol ediyoruz
+                        if current_time - last_read_times[brand] >= read_interval:
+                            print(f"Reading data from Slave ID {slave_id} ({brand})")
 
+                            data_row = {
+                                'Date': datetime.now().strftime('%d%m%y%H%M%S'),
+                                'Slave_ID': slave_id,
+                                'Brand': brand
+                            }
+
+                            for reg in registers_config:
+                                try:
+                                    registers = client.read_registers(reg['address'], reg['count'])
+
+                                    if registers is None:
+                                        formatted_value = "NULL"
+                                    else:
+                                        scaling = reg.get('scaling', 1)
+                                        multiplier = reg.get('multiplier', 1)
+                                        value = process_data(registers, reg['type'], scaling, multiplier)
+
+                                        if value is None:
+                                            formatted_value = "NULL"
+                                        elif isinstance(value, (int, float)):
+                                            formatted_value = f"{value:.6f}".replace('.', ',')
+                                        elif isinstance(value, str):
+                                            try:
+                                                formatted_value = f"{float(value):.6f}".replace('.', ',')
+                                            except ValueError:
+                                                formatted_value = value
+                                        else:
+                                            formatted_value = str(value)
+
+                                    data_row[reg['name']] = formatted_value
+
+                                except Exception as e:
+                                    print(f"Error with register {reg['name']}: {e}")
+                                    data_row[reg['name']] = "ERROR"
+
+                            # Veriyi RabbitMQ'ya gönder
+                            send_data_to_rabbitmq([data_row])  # Veriyi anında RabbitMQ'ya gönder
+
+                            last_read_times[brand] = current_time  # Son okuma zamanını güncelle
+                        else:
+                            # Okuma için belirlenen aralık gelmediyse bekle
+                            continue
+                    else:
+                        print(f"Connection failed for Slave ID {slave_id} ({brand})")
+                        # Bağlantı hatasında NULL değerler gönder
                         data_row = {
                             'Date': datetime.now().strftime('%d%m%y%H%M%S'),
                             'Slave_ID': slave_id,
                             'Brand': brand
                         }
-
                         for reg in registers_config:
-                            try:
-                                registers = client.read_registers(reg['address'], reg['count'])
+                            data_row[reg['name']] = "NULL"  # NULL yazıyoruz
 
-                                if registers is None:
-                                    formatted_value = "NULL"
-                                else:
-                                    scaling = reg.get('scaling', 1)
-                                    multiplier = reg.get('multiplier', 1)
-                                    value = process_data(registers, reg['type'], scaling, multiplier)
+                        send_data_to_rabbitmq([data_row])
 
-                                    if value is None:
-                                        formatted_value = "NULL"
-                                    elif isinstance(value, (int, float)):
-                                        formatted_value = f"{value:.6f}".replace('.', ',')
-                                    elif isinstance(value, str):
-                                        try:
-                                            formatted_value = f"{float(value):.6f}".replace('.', ',')
-                                        except ValueError:
-                                            formatted_value = value
-                                    else:
-                                        formatted_value = str(value)
+                except Exception as e:
+                    print(f"Modbus communication error for Slave ID {slave_id} ({brand}): {e}")
+                    # Hata durumunda da veriyi RabbitMQ'ya gönderelim
+                    data_row = {
+                        'Date': datetime.now().strftime('%d%m%y%H%M%S'),
+                        'Slave_ID': slave_id,
+                        'Brand': brand
+                    }
+                    for reg in registers_config:
+                        data_row[reg['name']] = "NULL"
 
-                                data_row[reg['name']] = formatted_value
-
-                            except Exception as e:
-                                print(f"Error with register {reg['name']}: {e}")
-                                data_row[reg['name']] = "ERROR"
-
-                        # Veriyi RabbitMQ'ya gönder
-                        send_data_to_rabbitmq([data_row])  # Veriyi anında RabbitMQ'ya gönder
-
-                        last_read_times[brand] = current_time  # Son okuma zamanını güncelle
-                    else:
-                        # Okuma için belirlenen aralık gelmediyse bekle
-                        continue
-
-                else:
-                    print(f"Connection failed for Slave ID {slave_id} ({brand})")
+                    send_data_to_rabbitmq([data_row])
 
             # CSV'yi belirli bir aralıkla yazma
             if current_time - last_csv_write_time >= intervals['csv_write_interval']:
@@ -269,4 +292,3 @@ if __name__ == "__main__":
     connect_to_rabbitmq(rabbitmq_config)  # RabbitMQ'ya bağlan
 
     app.run(debug=True, host="0.0.0.0", port=5000)  # Flask API çalıştır
-
